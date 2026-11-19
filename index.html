@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Péndulo amortiguado con impulso</title>
+<style>
+/* ===== 1. ESTILO (tema verde menta / violeta; claro y oscuro con "tokens") ===== */
+:root{--bg:#eef5f1;--card:#fff;--fg:#14342b;--mut:#5b7a6f;--ln:#cfe0d8;
+  --th:#6d28d9;--w:#0f766e;--imp:#e11d48;--cmp:#ea580c;--num:#16a34a;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1b17;--card:#162620;--fg:#e6f2ec;--mut:#8fb0a3;--ln:#2b4238;--th:#b794f6;--w:#2dd4bf;--imp:#fb7185;--cmp:#fb923c;--num:#4ade80}}
+:root[data-theme="dark"]{--bg:#0f1b17;--card:#162620;--fg:#e6f2ec;--mut:#8fb0a3;--ln:#2b4238;--th:#b794f6;--w:#2dd4bf;--imp:#fb7185;--cmp:#fb923c;--num:#4ade80}
+body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 2px} .sub{color:var(--mut);font-size:13px;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:10px}
+.ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px 18px;margin-bottom:8px}
+.c label{font-size:14px;display:block} .c small{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+.c input[type=range]{width:100%}
+.bar{margin-bottom:10px;font-size:13px} .bar label{margin-right:12px;white-space:nowrap}
+button,select{font:inherit;font-size:13px;padding:5px 10px;margin:3px 4px 0 0;border:1px solid var(--ln);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer}
+.wrap{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start}
+.col{display:flex;flex-direction:column;gap:10px;flex:1 1 340px;min-width:0}
+canvas{display:block;max-width:100%;height:auto}
+#info{font-size:13px;line-height:1.65}
+</style>
+</head>
+<body>
+<h1>Péndulo amortiguado con impulso</h1>
+<p class="sub">J·θ″ + b·θ′ + m·g·l·θ = I·δ(t − 2), con m = 2 kg, l = 1 m, θ(0) = 0.1 rad, θ′(0) = 0</p>
+
+<!-- Deslizadores: solo los dos parámetros que el enunciado pide variar o interpretar -->
+<div class="card">
+  <div class="ctl">
+    <div class="c"><label>Amortiguamiento <i>b</i> = <b id="ob"></b> N·m·s/rad</label>
+      <input id="sb" type="range" min="0" max="12" step="0.5" value="4">
+      <small>El enunciado usa b = 4 y luego b = 6. Más b = el péndulo se frena más rápido.</small></div>
+    <div class="c"><label>Intensidad del impulso <i>I</i> = <b id="oi"></b> N·m·s</label>
+      <input id="si" type="range" min="-6" max="6" step="0.5" value="2">
+      <small>El enunciado usa I = 2. Controla qué tan fuerte es el golpe en t = 2 s.</small></div>
+  </div>
+  <button id="b4">b = 4 (enunciado)</button><button id="b6">b = 6 (repetición)</button>
+  <button id="bp">⏯ Pausa</button><button id="br">↺ Reiniciar</button>
+  <span class="bar"><label><input type="checkbox" id="ccmp"> Superponer b = 6</label>
+  <label><input type="checkbox" id="cnum"> Solución numérica (validación)</label>
+  Velocidad <select id="ssp"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></span>
+</div>
+
+<div class="wrap" style="margin-top:10px">
+  <div class="card"><canvas id="cvP" width="300" height="380"></canvas></div>
+  <div class="col">
+    <div class="card"><canvas id="cvT" width="600" height="120"></canvas></div>
+    <div class="card"><canvas id="cvTh" width="600" height="250"></canvas></div>
+    <div class="card"><canvas id="cvW" width="600" height="210"></canvas></div>
+    <div class="card" id="info"></div>
+  </div>
+</div>
+
+<script>
+/* ===== 2. DATOS ===== */
+const $ = id => document.getElementById(id);              // atajo para buscar elementos
+const G=9.81, M=2, LEN=1, J=M*LEN*LEN;                    // g, masa, longitud, inercia J = m·l² = 2
+const A_T=2, TF=10, N=1000, DT=TF/N, TH0=0.1;             // instante del impulso, tiempo final, muestras, paso, θ(0)
+const P={b:4, I:2, sp:1, cmp:false, num:false};           // parámetros que mueve el usuario
+const S={t:0, run:true};                                  // reloj de la animación
+let A, B, NUM, errMax;                                    // A: analítica (b actual), B: analítica con b=6, NUM: RK4
+
+/* ===== 3. FÍSICA ===== */
+// (a) Solución ANALÍTICA obtenida con Laplace. Con α = b/(2J), ωn² = mgl/J y ωd = √(ωn² − α²):
+//   θ(t) = e^(−αt)·θ0·[cos ωd t + (α/ωd) sin ωd t]  +  (I/J)·u(t−a)·e^(−α(t−a))·sin(ωd(t−a))/ωd
+// El primer término es la respuesta a la condición inicial; el segundo, la respuesta al impulso.
+// (Con b ≤ 12 siempre es subamortiguado, porque α ≤ 3 < ωn ≈ 3.13.)
+function analytic(b){
+  const al=b/(2*J), wn2=M*G*LEN/J, wd=Math.sqrt(wn2-al*al);
+  const th=[], w=[];
+  for(let i=0;i<=N;i++){
+    const t=i*DT, e=Math.exp(-al*t);
+    let x = e*TH0*(Math.cos(wd*t)+al/wd*Math.sin(wd*t));   // θ libre
+    let v = -TH0*wn2/wd*e*Math.sin(wd*t);                   // θ′ libre (derivada del anterior)
+    if(t>=A_T-1e-9){                                        // u(t−a): el impulso actúa solo desde t = a
+      const s=t-A_T, es=Math.exp(-al*s), c=Math.cos(wd*s), sn=Math.sin(wd*s);
+      x += (P.I/J)*es*sn/wd;                                // aporte del impulso a θ
+      v += (P.I/J)*es*(c-al/wd*sn);                         // aporte a θ′: en s = 0 vale I/J (el SALTO)
+    }
+    th.push(x); w.push(v);
+  }
+  return {th,w};
+}
+// (b) Solución NUMÉRICA (Runge-Kutta 4) para validar. El impulso se aplica como un salto
+//     instantáneo de velocidad: θ′(a+) = θ′(a−) + I/J.
+function numeric(b){
+  const f=(x,v)=>(-b*v-M*G*LEN*x)/J, sub=10, h=DT/sub;     // θ″ = (−bθ′ − mglθ)/J
+  let x=TH0, v=0; const out=[x];
+  for(let i=0;i<N;i++){
+    for(let s=0;s<sub;s++){
+      if(i*sub+s===Math.round(A_T/h)) v+=P.I/J;            // aquí ocurre el golpe
+      const k1x=v,           k1v=f(x,v);
+      const k2x=v+h/2*k1v,   k2v=f(x+h/2*k1x, v+h/2*k1v);
+      const k3x=v+h/2*k2v,   k3v=f(x+h/2*k2x, v+h/2*k2v);
+      const k4x=v+h*k3v,     k4v=f(x+h*k3x,   v+h*k3v);
+      x+=h/6*(k1x+2*k2x+2*k3x+k4x); v+=h/6*(k1v+2*k2v+2*k3v+k4v);
+    }
+    out.push(x);
+  }
+  return out;
+}
+function recompute(){                                       // se llama cada vez que cambia b o I
+  A=analytic(P.b); B=analytic(6); NUM=numeric(P.b);
+  errMax=0; for(let i=0;i<=N;i++) errMax=Math.max(errMax,Math.abs(NUM[i]-A.th[i]));
+  S.t=0; S.run=true;
+}
+
+/* ===== 4. DIBUJO ===== */
+const col = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const lim = (...arrs) => Math.max(0.05,...arrs.flat().map(Math.abs))*1.15;   // escala vertical automática
+
+function base(id,title,lo){                                 // marco, ejes y línea punteada en t = 2
+  const c=$(id), g=c.getContext('2d'), W=c.width, H=c.height, ML=52, MR=10, MT=22, MB=22;
+  const px=t=>ML+(W-ML-MR)*t/TF;
+  g.clearRect(0,0,W,H); g.font='12px system-ui'; g.fillStyle=col('--mut'); g.fillText(title,ML,14);
+  g.strokeStyle=col('--ln'); g.lineWidth=1; g.strokeRect(ML,MT,W-ML-MR,H-MT-MB);
+  for(let t=0;t<=TF;t+=2) g.fillText(t,px(t)-3,H-6);
+  g.fillText('t (s)',W-34,H-6);
+  g.setLineDash([4,4]); g.strokeStyle=col('--imp'); g.beginPath();
+  g.moveTo(px(A_T),MT); g.lineTo(px(A_T),H-MB); g.stroke(); g.setLineDash([]);
+  return {g,W,H,ML,MR,MT,MB,px};
+}
+function cursor(o){                                         // línea vertical del tiempo actual
+  o.g.globalAlpha=0.5; o.g.strokeStyle=col('--fg'); o.g.beginPath();
+  o.g.moveTo(o.px(S.t),o.MT); o.g.lineTo(o.px(S.t),o.H-o.MB); o.g.stroke(); o.g.globalAlpha=1;
+}
+function curve(id,title,sers,L,note){                       // gráfica de una variable (θ o θ′)
+  const o=base(id,title), {g,H,ML,MR,MT,MB,px,W}=o;
+  const py=y=>MT+(H-MT-MB)*(0.5-y/(2*L)), k=Math.min(N,Math.round(S.t/DT));
+  g.strokeStyle=col('--ln'); g.beginPath(); g.moveTo(ML,py(0)); g.lineTo(W-MR,py(0)); g.stroke();
+  g.fillStyle=col('--mut'); g.fillText('0',ML-14,py(0)+4); g.fillText(L.toFixed(2),6,MT+10); g.fillText((-L).toFixed(2),2,H-MB-3);
+  sers.forEach(s=>{
+    g.strokeStyle=g.fillStyle=col(s.c); g.lineWidth=2;
+    if(s.dots){ for(let i=0;i<=k;i+=20){ g.beginPath(); g.arc(px(i*DT),py(s.a[i]),3,0,7); g.fill(); } return; }
+    const path=to=>{ g.beginPath(); for(let i=0;i<=to;i++) i?g.lineTo(px(i*DT),py(s.a[i])):g.moveTo(px(0),py(s.a[0])); g.stroke(); };
+    g.globalAlpha=0.25; path(N); g.globalAlpha=1; path(k);  // curva completa tenue + parte ya recorrida
+    g.beginPath(); g.arc(px(k*DT),py(s.a[k]),4,0,7); g.fill(); // punto actual
+  });
+  if(note){ g.fillStyle=col('--imp'); g.fillText(note,px(A_T)+6,MT+14); }
+  cursor(o);
+}
+function drawTau(){                                         // gráfica de la ENTRADA: el impulso como una flecha
+  const o=base('cvT','Entrada: τ(t) = I·δ(t − 2)  (la flecha representa un impulso)'), {g,H,ML,MR,MT,MB,px,W}=o;
+  const y0=MT+(H-MT-MB)/2, s=Math.sign(P.I), x=px(A_T), on=S.t>=A_T;
+  g.strokeStyle=col('--ln'); g.beginPath(); g.moveTo(ML,y0); g.lineTo(W-MR,y0); g.stroke();   // τ = 0 en todo t ≠ 2
+  g.fillStyle=col('--mut'); g.fillText('τ = 0',ML+4,y0-4);
+  if(s!==0){
+    const y1=y0-s*(H-MT-MB)/2*0.85;
+    g.globalAlpha=on?1:0.4; g.strokeStyle=g.fillStyle=col('--imp'); g.lineWidth=3;
+    g.beginPath(); g.moveTo(x,y0); g.lineTo(x,y1); g.stroke();                                // flecha
+    g.beginPath(); g.moveTo(x,y1); g.lineTo(x-6,y1+s*10); g.lineTo(x+6,y1+s*10); g.fill();    // punta
+    g.globalAlpha=1; g.fillText('área = I = '+P.I+' N·m·s',x+12,y0-s*18);
+  } else { g.fillStyle=col('--imp'); g.fillText('I = 0: no hay impulso',x+8,y0-14); }
+  cursor(o);
+}
+function drawPend(){                                        // animación del péndulo
+  const c=$('cvP'), g=c.getContext('2d'), W=c.width, H=c.height, k=Math.min(N,Math.round(S.t/DT));
+  const px=W/2, py=50, R=230;                               // pivote y largo dibujado de la varilla
+  const ang=Math.max(-1.4,Math.min(1.4,A.th[k]*3));         // ángulo dibujado ×3 (exagerado para que se vea)
+  const bx=px+R*Math.sin(ang), by=py+R*Math.cos(ang);
+  g.clearRect(0,0,W,H); g.lineWidth=1; g.strokeStyle=col('--mut'); g.setLineDash([5,4]);
+  g.beginPath(); g.moveTo(px,py); g.lineTo(px,py+R+30); g.stroke(); g.setLineDash([]);   // vertical (θ = 0)
+  g.strokeStyle=col('--th'); g.lineWidth=2; g.beginPath(); g.arc(px,py,70,Math.PI/2,Math.PI/2-ang,ang>0); g.stroke(); // arco de θ
+  g.lineWidth=4; g.strokeStyle=col('--fg'); g.beginPath(); g.moveTo(px,py); g.lineTo(bx,by); g.stroke();            // varilla
+  g.fillStyle=col('--th'); g.beginPath(); g.arc(bx,by,20,0,7); g.fill();                                              // masa
+  g.fillStyle=col('--fg'); g.beginPath(); g.arc(px,py,6,0,7); g.fill();                                               // pivote
+  g.fillStyle=col('--mut'); g.font='12px system-ui'; g.fillText('θ = '+A.th[k].toFixed(3)+' rad',10,H-24);
+  g.fillText('(ángulo dibujado ×3 para verse mejor)',10,H-8);
+  const s=Math.sign(P.I);
+  if(s!==0 && S.t>=A_T && S.t<A_T+0.3){                     // destello del golpe (solo ~0.3 s)
+    g.strokeStyle=g.fillStyle=col('--imp'); g.lineWidth=4;
+    const x1=bx-s*70, x2=bx-s*26;
+    g.beginPath(); g.moveTo(x1,by); g.lineTo(x2,by); g.stroke();
+    g.beginPath(); g.moveTo(x2+s*10,by); g.lineTo(x2-s*2,by-8); g.lineTo(x2-s*2,by+8); g.fill();
+    g.fillText('¡impulso!',Math.min(x1,x2),by-14);
+  }
+}
+function drawInfo(){                                        // datos calculados en vivo
+  const al=P.b/(2*J), wn=Math.sqrt(M*G*LEN/J), wd=Math.sqrt(wn*wn-al*al), k=Math.min(N,Math.round(S.t/DT));
+  $('info').innerHTML=
+   `<b>Ecuación:</b> ${J}θ″ + ${P.b}θ′ + ${(M*G*LEN).toFixed(2)}θ = ${P.I}·δ(t − 2)<br>
+    <b>ωₙ</b> = √(mgl/J) = ${wn.toFixed(3)} rad/s &nbsp; <b>α</b> = b/2J = ${al.toFixed(3)} 1/s &nbsp; <b>ω<sub>d</sub></b> = ${wd.toFixed(3)} rad/s<br>
+    <b>ζ</b> = ${(al/wn).toFixed(3)} (subamortiguado) &nbsp; periodo amortiguado = ${(2*Math.PI/wd).toFixed(2)} s<br>
+    <b>Salto de θ′ en t = 2:</b> I/J = ${(P.I/J).toFixed(3)} rad/s (θ no salta)<br>
+    t = ${S.t.toFixed(2)} s &nbsp; θ = ${A.th[k].toFixed(4)} rad &nbsp; θ′ = ${A.w[k].toFixed(4)} rad/s`
+   + (P.num?`<br><b>Validación:</b> error máximo |θ_RK4 − θ_Laplace| = ${errMax.toExponential(1)} rad`:'');
+}
+
+/* ===== 5. CONTROL ===== */
+function setB(v){ P.b=v; $('sb').value=v; $('ob').textContent=v; recompute(); }
+function setI(v){ P.I=v; $('si').value=v; $('oi').textContent=v; recompute(); }
+$('sb').oninput=e=>setB(+e.target.value);                  // mover b recalcula todo y reinicia
+$('si').oninput=e=>setI(+e.target.value);                  // mover I recalcula todo y reinicia
+$('b4').onclick=()=>setB(4); $('b6').onclick=()=>setB(6);
+$('bp').onclick=()=>{S.run=!S.run;}; $('br').onclick=()=>{S.t=0;S.run=true;};
+$('ccmp').onchange=e=>{P.cmp=e.target.checked;}; $('cnum').onchange=e=>{P.num=e.target.checked;};
+$('ssp').onchange=e=>{P.sp=+e.target.value;};
+
+let last=0;
+function loop(ts){                                          // se ejecuta ~60 veces por segundo
+  const dtr=Math.min((ts-last)/1000,0.05); last=ts;
+  if(S.run){ S.t=Math.min(TF,S.t+dtr*P.sp); if(S.t>=TF) S.run=false; }
+  const sTh=[{a:A.th,c:'--th'}], sW=[{a:A.w,c:'--w'}];
+  if(P.cmp){ sTh.push({a:B.th,c:'--cmp'}); sW.push({a:B.w,c:'--cmp'}); }
+  if(P.num) sTh.push({a:NUM,c:'--num',dots:true});
+  drawPend(); drawTau();
+  curve('cvTh','θ(t): ángulo'+(P.cmp?'  (violeta b='+P.b+', naranja b=6)':''),sTh,lim(A.th,P.cmp?B.th:[]));
+  curve('cvW','θ′(t): velocidad angular',sW,lim(A.w,P.cmp?B.w:[]),'salto = I/J');
+  drawInfo(); requestAnimationFrame(loop);
+}
+setB(4); setI(2); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
